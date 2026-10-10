@@ -1,0 +1,46 @@
+// Shader-core baseline: int8 GEMM computed on the EUs (DP4A-class / IMAD path).
+// 16x16 thread tile, shared-memory K-tiling, one output per thread.
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+#extension GL_EXT_buffer_reference : enable
+#extension GL_EXT_buffer_reference2 : enable
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(buffer_reference, std430) readonly  buffer I8B  { int8_t  x[]; };
+layout(buffer_reference, std430) writeonly buffer I32B { int32_t x[]; };
+
+layout(push_constant) uniform P {
+    uint64_t aAddr;
+    uint64_t bAddr;
+    uint64_t cAddr;
+    uint M;
+    uint N;
+    uint K;
+} pc;
+
+shared int8_t As[16][16];
+shared int8_t Bs[16][16];
+
+void main() {
+    I8B  A = I8B(pc.aAddr);
+    I8B  B = I8B(pc.bAddr);
+    I32B C = I32B(pc.cAddr);
+
+    uint tx = gl_LocalInvocationID.x;
+    uint ty = gl_LocalInvocationID.y;
+    uint row = gl_WorkGroupID.y * 16u + ty;
+    uint col = gl_WorkGroupID.x * 16u + tx;
+
+    int acc = 0;
+    for (uint k0 = 0u; k0 < pc.K; k0 += 16u) {
+        As[ty][tx] = A.x[row * pc.K + (k0 + tx)];
+        Bs[ty][tx] = B.x[(k0 + ty) * pc.N + col];
+        barrier();
+        for (uint k = 0u; k < 16u; k++) {
+            acc += int(As[ty][k]) * int(Bs[k][tx]);
+        }
+        barrier();
+    }
+    C.x[row * pc.N + col] = acc;
+}

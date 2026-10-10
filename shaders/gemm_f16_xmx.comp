@@ -1,0 +1,41 @@
+// XMX path (f16): GEMM via KHR cooperative matrix, fp16 inputs -> fp32 accumulate
+// (device config: M8 N16 K16, A=f16 B=f16 C=f32). Workgroup = one subgroup,
+// computing a 16(M) x 32(N) tile as a 2x2 grid of 8x16 MMAs.
+#version 450
+#extension GL_KHR_memory_scope_semantics : enable
+#extension GL_KHR_cooperative_matrix : enable
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+#extension GL_EXT_buffer_reference : enable
+#extension GL_EXT_buffer_reference2 : enable
+
+layout(local_size_x = 32) in;
+layout(buffer_reference, std430) readonly  buffer F16B { float16_t x[]; };
+layout(buffer_reference, std430) writeonly buffer F32B  { float     x[]; };
+
+layout(push_constant) uniform P { uint64_t aAddr; uint64_t bAddr; uint64_t cAddr; uint M; uint N; uint K; } pc;
+
+#define AMAT coopmat<float16_t, gl_ScopeSubgroup, 8, 16, gl_MatrixUseA>
+#define BMAT coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB>
+#define CMAT coopmat<float,     gl_ScopeSubgroup, 8, 16, gl_MatrixUseAccumulator>
+#define MMA(a,b,c) coopMatMulAdd(a, b, c)
+
+void main() {
+    uint row = gl_WorkGroupID.x * 16u;
+    uint col = gl_WorkGroupID.y * 32u;
+    AMAT a0, a1; BMAT b0, b1; CMAT c00, c01, c10, c11;
+    c00 = CMAT(0.0); c01 = CMAT(0.0); c10 = CMAT(0.0); c11 = CMAT(0.0);
+    for (uint k0 = 0u; k0 < pc.K; k0 += 16u) {
+        coopMatLoad(a0, F16B(pc.aAddr + uint64_t(((row     ) * pc.K + k0) * 2u)).x, 0, pc.K, gl_CooperativeMatrixLayoutRowMajor);
+        coopMatLoad(a1, F16B(pc.aAddr + uint64_t(((row +  8u) * pc.K + k0) * 2u)).x, 0, pc.K, gl_CooperativeMatrixLayoutRowMajor);
+        coopMatLoad(b0, F16B(pc.bAddr + uint64_t((k0 * pc.N + col) * 2u)).x,        0, pc.N, gl_CooperativeMatrixLayoutRowMajor);
+        coopMatLoad(b1, F16B(pc.bAddr + uint64_t((k0 * pc.N + col + 16u) * 2u)).x,  0, pc.N, gl_CooperativeMatrixLayoutRowMajor);
+        c00 = MMA(a0,b0,c00); c01 = MMA(a0,b1,c01);
+        c10 = MMA(a1,b0,c10); c11 = MMA(a1,b1,c11);
+    }
+    #define STORE(cm,r,c) { F32B t = F32B(pc.cAddr + uint64_t((((r) * pc.N + (c)) * 4u))); \
+                            coopMatStore(cm, t.x, 0, pc.N, gl_CooperativeMatrixLayoutRowMajor); }
+    STORE(c00, row,    col);
+    STORE(c01, row,    col+16u);
+    STORE(c10, row+8u, col);
+    STORE(c11, row+8u, col+16u);
+}

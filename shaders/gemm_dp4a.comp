@@ -1,0 +1,51 @@
+// DP4A baseline: int8 GEMM using the integer dot-product instruction
+// (GL_EXT_integer_dot_product dotPacked4x8EXT -> SPV_KHR_integer_dot_product OpSDot)
+// executed on the EUs (shader cores).
+// A is MxK row-major; B is supplied transposed (NxK) so 4 consecutive K are
+// contiguous and can be read as one packed 32-bit word.
+#version 450
+#extension GL_EXT_integer_dot_product : enable
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+#extension GL_EXT_buffer_reference : enable
+#extension GL_EXT_buffer_reference2 : enable
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(buffer_reference, std430) readonly  buffer I32W { int x[]; };   // packed 4x int8 words
+layout(buffer_reference, std430) writeonly buffer C32  { int x[]; };
+
+layout(push_constant) uniform P {
+    uint64_t aAddr;   // A  (M x K)  as packed words, row stride K/4
+    uint64_t bAddr;   // Bt (N x K)  as packed words, row stride K/4
+    uint64_t cAddr;   // C  (M x N)  int32
+    uint M; uint N; uint K;
+} pc;
+
+shared int As[16][8];   // 16 rows x 8 words (32 int8)
+shared int Bs[16][8];
+
+void main() {
+    I32W Aw = I32W(pc.aAddr);
+    I32W Bw = I32W(pc.bAddr);
+    C32  C  = C32(pc.cAddr);
+
+    uint baseRow = gl_WorkGroupID.y * 16u;
+    uint baseCol = gl_WorkGroupID.x * 16u;
+    uint KW = pc.K / 4u;                 // words per row
+    uint tx = gl_LocalInvocationID.x;
+    uint ty = gl_LocalInvocationID.y;
+
+    int acc = 0;
+    for (uint kw0 = 0u; kw0 < KW; kw0 += 8u) {
+        for (uint idx = ty * 16u + tx; idx < 16u * 8u; idx += 256u) {
+            uint r = idx / 8u, w = idx % 8u;
+            As[r][w] = Aw.x[(baseRow + r) * KW + kw0 + w];
+            Bs[r][w] = Bw.x[(baseCol + r) * KW + kw0 + w];
+        }
+        barrier();
+        for (uint w = 0u; w < 8u; w++)
+            acc += dotPacked4x8EXT(As[ty][w], Bs[tx][w]);
+        barrier();
+    }
+    C.x[(baseRow + ty) * pc.N + (baseCol + tx)] = acc;
+}

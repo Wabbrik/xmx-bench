@@ -1,0 +1,36 @@
+// Shader-core baseline (f16): fp16 GEMM on the EUs, fp32 accumulate.
+// 16x16 thread tile, shared-memory K-tiling, one output per thread.
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+#extension GL_EXT_buffer_reference : enable
+#extension GL_EXT_buffer_reference2 : enable
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(buffer_reference, std430) readonly  buffer F16B { float16_t x[]; };
+layout(buffer_reference, std430) writeonly buffer F32B  { float     x[]; };
+
+layout(push_constant) uniform P { uint64_t aAddr; uint64_t bAddr; uint64_t cAddr; uint M; uint N; uint K; } pc;
+
+shared float As[16][16];
+shared float Bs[16][16];
+
+void main() {
+    F16B A = F16B(pc.aAddr);
+    F16B B = F16B(pc.bAddr);
+    F32B C = F32B(pc.cAddr);
+    uint tx = gl_LocalInvocationID.x;
+    uint ty = gl_LocalInvocationID.y;
+    uint row = gl_WorkGroupID.y * 16u + ty;
+    uint col = gl_WorkGroupID.x * 16u + tx;
+
+    float acc = 0.0;
+    for (uint k0 = 0u; k0 < pc.K; k0 += 16u) {
+        As[ty][tx] = float(A.x[row * pc.K + (k0 + tx)]);
+        Bs[ty][tx] = float(B.x[(k0 + ty) * pc.N + col]);
+        barrier();
+        for (uint k = 0u; k < 16u; k++)
+            acc += As[ty][k] * Bs[k][tx];
+        barrier();
+    }
+    C.x[row * pc.N + col] = acc;
+}

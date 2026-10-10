@@ -1,0 +1,44 @@
+// XMX path: int8 GEMM via KHR cooperative matrix (XMX/DPAS).
+// Workgroup = one subgroup computing a 16(M) x 32(N) tile (2x2 of 8x16 MMAs).
+#version 450
+#extension GL_KHR_memory_scope_semantics : enable
+#extension GL_KHR_cooperative_matrix : enable
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+#extension GL_EXT_buffer_reference : enable
+#extension GL_EXT_buffer_reference2 : enable
+
+layout(local_size_x = 32) in;
+layout(buffer_reference, std430) readonly  buffer I8B  { int8_t  x[]; };
+layout(buffer_reference, std430) writeonly buffer I32B { int32_t x[]; };
+layout(push_constant) uniform P { uint64_t aAddr; uint64_t bAddr; uint64_t cAddr; uint M; uint N; uint K; } pc;
+
+#define AMAT coopmat<int8_t,  gl_ScopeSubgroup, 8, 32, gl_MatrixUseA>
+#define BMAT coopmat<int8_t,  gl_ScopeSubgroup, 32, 16, gl_MatrixUseB>
+#define CMAT coopmat<int32_t, gl_ScopeSubgroup, 8, 16, gl_MatrixUseAccumulator>
+#define MMA(a,b,c) coopMatMulAdd(a, b, c)
+#define LD(m, p) coopMatLoad(m, (p).x, 0, 0u, gl_CooperativeMatrixLayoutRowMajor)
+#define ST(cm,r,c) { I32B t = I32B(pc.cAddr + uint64_t((((r) * pc.N + (c)) * 4u))); \
+                     coopMatStore(cm, t.x, 0, pc.N, gl_CooperativeMatrixLayoutRowMajor); }
+
+void main() {
+    uint row = gl_WorkGroupID.x * 16u;
+    uint col = gl_WorkGroupID.y * 32u;
+    AMAT a0, a1; BMAT b0, b1; CMAT c00, c01, c10, c11;
+    c00 = CMAT(0); c01 = CMAT(0); c10 = CMAT(0); c11 = CMAT(0);
+    for (uint k0 = 0u; k0 < pc.K; k0 += 32u) {
+        I8B ap0 = I8B(pc.aAddr + uint64_t(row * pc.K + k0));
+        I8B ap1 = I8B(pc.aAddr + uint64_t((row + 8u) * pc.K + k0));
+        I8B bp0 = I8B(pc.bAddr + uint64_t(k0 * pc.N + col));
+        I8B bp1 = I8B(pc.bAddr + uint64_t(k0 * pc.N + col + 16u));
+        coopMatLoad(a0, ap0.x, 0, pc.K, gl_CooperativeMatrixLayoutRowMajor);
+        coopMatLoad(a1, ap1.x, 0, pc.K, gl_CooperativeMatrixLayoutRowMajor);
+        coopMatLoad(b0, bp0.x, 0, pc.N, gl_CooperativeMatrixLayoutRowMajor);
+        coopMatLoad(b1, bp1.x, 0, pc.N, gl_CooperativeMatrixLayoutRowMajor);
+        c00 = MMA(a0,b0,c00); c01 = MMA(a0,b1,c01);
+        c10 = MMA(a1,b0,c10); c11 = MMA(a1,b1,c11);
+    }
+    ST(c00, row,      col);
+    ST(c01, row,      col+16u);
+    ST(c10, row+8u,   col);
+    ST(c11, row+8u,   col+16u);
+}
